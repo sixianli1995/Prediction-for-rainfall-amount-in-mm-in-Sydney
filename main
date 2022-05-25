@@ -1,0 +1,431 @@
+---
+title: "STAT420 Final Project"
+author: "Aaryan Bahl (aaryanb2) , Sixian Li (sixianl2), Zhixing Guo (zhixing5)"
+date: "11/11/2020"
+output:
+  html_document: default
+  pdf_document: default
+subtitle: Prediction for rainfall amount (in mm) in Sydney
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(data.table)
+library(tidyverse)
+library(faraway)
+library(bestNormalize)
+library(plyr)
+library(clifro)
+library(Metrics) 
+```
+
+## Section 1 Introduction
+
+Our group's project aims to predict the precipitation(mm) in Sydney for next day based on the previous weather data. Sydney is a metropolis with beautiful coastal line and a typical humid subtropical climate which is distinguished from the climate in Urbana and Champaign. We are especially interested in the relationship between rainfall and other weather factors such as wind, sunshine etc. And we want to use the knowledge we learned from STAT420 to build a regression model to predict the next day's precipitation(mm) and test if our model coincides with the rainfall pattern of the humid subtropical climate. 
+
+### Section 1.1 Description of the data file
+
+The weatherAUS data contains daily weather observations from numerous Australian weather stations, which are available from <http://www.bom.gov.au/climate/data>. This dataset is also available via the R package rattle.data and at <https://rattle.togaware.com/weatherAUS.csv>.
+
+The whole weatherAUS dataset contains 142193 observations of 24 variables.
+
+* Data: The date of observation
+
+* Location: The common name of the location of the weather station
+
+* MinTemp: The minimum temperature in degrees celsius
+
+* MaxTemp: The maximum temperature in degrees celsius
+
+* Rainfall: The amount of rainfall recorded for the day in mm
+
+* Evaporation: The so-called Class A pan evaporation (mm) in the 24 hours to 9am
+
+* Sunshine: The number of hours of bright sunshine in the day
+
+* WindGustDir: The direction of the strongest wind gust in the 24 hours to midnight
+
+* WindGustSpeed: The speed (km/h) of the strongest wind gust in the 24 hours to midnight
+
+* WindDir9am, WindDir3pm: Direction of the wind at 9am and 3pm respectively
+
+* WindSpeed9am, WindSpeed3pm: Wind speed (km/hr) averaged over 10 minutes prior to 9am and 3pm respectively
+
+* Humidity9am, Humidity3pm: Humidity (percent) at 9am and 3pm respectively
+
+* Pressure9am, Pressure3pm: Atmospheric pressure (hpa) reduced to mean sea level at 9am and 3pm respectively
+
+* Cloud9am, Cloud3pm: Fraction of sky obscured by cloud (oktas) at 9am and 3pm respectively
+
+* Temp9am, Temp3pm: Temperature (degrees C) at 9am and 3 pm respectively
+
+* RainToday: indicator for whether precipitation (mm) in the 24 hours to 9am exceeds 1mm
+
+* RISK_MM: The amount of rainfall recorded for next day in mm
+
+* RainTomorrow: indicator for whether precipitation (mm) in tomorrow to 9am exceeds 1mm
+
+### Section 1.2 Primary research and questions
+
+We did some research on the cilmate of Sydney, and we found the following observations helpful for our project:
+
+* Sydney has a humid subtropical climate. It has mild and cool winters and warm and hot summers. Seasonal differences are not extreme due to its proximity to the ocean. (Source:  "Australian climatic zones")
+
+* Sydney has more rainfall during the first half of the year, and less during the second half of the year. During fall and winter, east cost lows can bring large amounts of rainfall. The dryest and wettest months can differ from year to year due to the unpredictability of the rainfall. (Source: "Sydney future: high temps, erratic rain")
+
+* Sydney has relatively few rainy days even in the months of highest rainfall. It generally receives heavy rainfall day events which last for less than two or three days. (Source: "The Lost Seasons")
+
+* Precipitation is relatively higher when easterly winds is dominate. (Source: "Climate of Sydney Australia the Good and the Bad")
+
+Based on these observations, we come up with the following factors to consider while constructing models:
+
+* The model needs to take dryer and wetter seasons into consideration.
+
+* Wind direction probably plays an important role in predicting the rainfall. 
+
+* The rainfall of the previous day is is an important factor to take into consideration. 
+
+
+## Section 2 Exploratory Data Analysis and Methodology
+```{r}
+# import data
+weather <- fread("weatherAUS.csv", data.table = FALSE)
+```
+
+```{r}
+# select weather data in Sydney and its neighborhood areas
+sydney.weather = weather[weather$Location %in% c("Sydney","SydneyAirport"),]
+sydney.weather = sydney.weather[sydney.weather$RISK_MM > 0,]
+
+# remove Nan
+sydney.weather = na.omit(sydney.weather)
+```
+
+### Section 2.1 Categorical variables
+
+By researching from a climate statistics report by the Burea of Meteorology on Sydney we observed that February to June saw the most rainfail and was regarded as the wet season of Sydney. So, we decided to create a new categorical variable "Season" that would indicate if the data was from a wet month or a dry month in the year.
+
+```{r}
+# the variable Date
+funSeason = function(x){
+  month = as.numeric(format(x, "%m"))
+  if (month >= 2 & month <= 6) {"Wet"}
+  else {"Dry"}
+}
+sydney.weather$Season <- mapply(funSeason, sydney.weather$Date)
+count(sydney.weather, 'Season')
+```
+
+Next, we were trying to analyze categorical variables that indicated the wind gust direction or the wind direction at 9am or 3pm. We calculated the count of each variable in a particular direction to see if we could find any trends that could be helpful.
+
+```{r}
+# the variable WindGustDir, WindDir9am, and WindDir3pm
+# count the level frequency for each of the three factor variables
+df1 = count(sydney.weather, 'WindGustDir')
+df1[order(df1$freq),]
+df2 = count(sydney.weather, 'WindDir9am')
+df2[order(df2$freq),]
+df3 = count(sydney.weather, 'WindDir3pm')
+df3[order(df3$freq),]
+```
+
+From the count above, we couldn't find any trends in wind gust though we found some thing interesting for wind direction. We observed that some wind directions that were predominant at 9am (SSE,NNW,N,NW) were subordinate winds at 3pm. The vice versa also applied. To see if this was actually true we used plots below to visualize this.
+
+```{r}
+# help function for printing the wind rose plot
+funWind <- function(x) {
+  if (x == "N") {360}
+  else if (x == "NNE") {25}
+  else if (x == "NE") {45}
+  else if (x == "ENE") {65}
+  else if (x == "E") {90}
+  else if (x == "ESE") {115}
+  else if (x == "SE") {135}
+  else if (x == "SSE") {155}
+  else if (x == "S") {180}
+  else if (x == "SSW") {205}
+  else if (x == "SW") {225}
+  else if (x == "WSW") {245}
+  else if (x == "W") {270}
+  else if (x == "WNW") {295}
+  else if (x == "NW") {315}
+  else {335}
+}
+wind = data.frame(gustDir = sydney.weather$WindGustDir, 
+                 gustSpeed = sydney.weather$WindGustSpeed,
+                 dir9am = sydney.weather$WindDir9am,
+                 speed9am = sydney.weather$WindSpeed9am,
+                 dir3pm = sydney.weather$WindDir3pm,
+                 speed3pm = sydney.weather$WindSpeed3pm
+                 )
+wind$gustDir <- mapply(funWind, wind$gustDir)
+wind$dir9am <- mapply(funWind, wind$dir9am)
+wind$dir3pm <- mapply(funWind, wind$dir3pm)
+```
+
+```{r}
+# wind rose plot
+with(wind, windrose(gustSpeed, gustDir, "Gust Wind in Sydney"))
+with(wind, windrose(speed9am, dir9am, "Wind at 9am in Sydney"))
+with(wind, windrose(speed3pm, dir3pm, "Wind at 3pm in Sydney"))
+```
+
+We can see in the plots for Wind at 3pm and at 9pm that they flow in opposite direction at these times. Wind at 9am is predominant from the North West and wind at 3pm is predominat from the South East. Though we found the number of levels in these categorical variable to be too much. So we created the function below to reduce from 16 levels to 4 levels.
+
+```{r}
+#help function for combine and reduce the level of the factor variables
+funWind2 <- function(x) {
+  if (x %in% c("E","ENE","ESE", "NE","SE")) {"E"}
+  else if (x %in% c("W","WNW","WSW", "NW", "SW")) {"W"}
+  else if (x %in% c("N","NNE","NNW")) {"N"}
+  else {"S"}
+}
+
+sydney.weather$WindGustDir <- mapply(funWind2, sydney.weather$WindGustDir)
+sydney.weather$WindDir9am <- mapply(funWind2, sydney.weather$WindDir9am)
+sydney.weather$WindDir3pm <- mapply(funWind2, sydney.weather$WindDir3pm)
+
+# count the level frequency for each of the three factor variables
+df1 = count(sydney.weather, 'WindGustDir')
+df1[order(df1$freq),]
+df2 = count(sydney.weather, 'WindDir9am')
+df2[order(df2$freq),]
+df3 = count(sydney.weather, 'WindDir3pm')
+df3[order(df3$freq),]
+```
+
+Now we conver our direction variables to factors and integer variables to numeric to avoid any complications in our modelling. We also remove unwanted columns like Date, Location, RainToday and RainTomorrow. RainTomorrow is removed from the table as it depends on the response we are trying to predict and we cannot have such a highly correlated variable in our model.
+
+```{r}
+# convert the wind direction variables from char to factors
+sydney.weather$WindGustDir = as.factor(sydney.weather$WindGustDir)
+sydney.weather$WindDir9am = as.factor(sydney.weather$WindDir9am)
+sydney.weather$WindDir3pm = as.factor(sydney.weather$WindDir3pm)
+sydney.weather$Season = as.factor(sydney.weather$Season)
+
+# convert the integer variables to numeric
+sydney.weather$WindGustSpeed = as.numeric(sydney.weather$WindGustSpeed)
+sydney.weather$WindSpeed9am = as.numeric(sydney.weather$WindSpeed9am)
+sydney.weather$WindSpeed3pm = as.numeric(sydney.weather$WindSpeed3pm)
+sydney.weather$Humidity9am = as.numeric(sydney.weather$Humidity9am)
+sydney.weather$Humidity3pm = as.numeric(sydney.weather$Humidity3pm)
+sydney.weather$Cloud9am = as.numeric(sydney.weather$Cloud9am)
+sydney.weather$Cloud3pm = as.numeric(sydney.weather$Cloud3pm)
+
+# remove Nan
+sydney.weather = na.omit(sydney.weather)
+
+# remove unwanted columns
+sydney.weather = sydney.weather[,!(names(sydney.weather) %in% c("Date","Location", "RainToday", "RainTomorrow"))]
+
+# create new columns 
+sydney.weather$TempDiff = with(sydney.weather, Temp3pm - Temp9am)
+sydney.weather$AveTemp = with(sydney.weather, (MinTemp + MaxTemp)/2)
+```
+
+### Section 2.2 Numerical variables, Transformations and Collinearity
+
+Further, we split the refined data into a train and test dataset. The train data is 80% of the refined data that would be used for training the model that we get in the end. The test dataset will be used to fit our model on and to check how accurate our prediction will be.
+
+```{r}
+# split the data into train data and test
+set.seed(19950922)
+index = sample(nrow(sydney.weather), size = round(1651 * 0.8))
+sydney.train = sydney.weather[index,]
+sydney.test = sydney.weather[-index,]
+
+str(sydney.train)
+```
+
+Next we check if we need to transform our response or one of our predictors.
+
+```{r}
+# response RISK_MM
+plot(density(sydney.train$RISK_MM))
+
+bestNormalize(sydney.train$RISK_MM)
+
+plot(density(log(sydney.train$RISK_MM, base = 10)))
+```
+
+After applying transformations to many variables we found only a tranformation for our response variable would be helpful. From the plots above, we see that the first plot shows the density of our response variable, RISK_MM, and that the data was highly skewed to the left. To normalize this data we used the bestNormalize function to find the best normalizing tranformation for this variable. The log trransformation was found to be the best and that we can clearly see from the last plot above and how it is not skewed anymore.
+
+Now we fit a full model with log(RISK_MM) as the response.
+
+```{r}
+# first fit a full model and apply backward selection to remove insignificant variables
+fit1 = lm(log(RISK_MM, base = 10) ~., data = sydney.train)
+summary(step(fit1, direction = "backward", trace = 0))
+```
+
+We calculate the RMSE for the full model.
+
+```{r}
+# do prediction on the test data and calculate the RMSE
+fit1.pre = predict(fit1, sydney.test)
+rmse(log(sydney.test$RISK_MM), fit1.pre)
+```
+
+The warning above indicated that there is collinearity among a few predictor variables and we should eliminate such variables from predicting our response. Below we will create a correlation table to find variables with a high collinearity and get rid of them.
+
+```{r}
+# based on the warning above, we will detect the collinearity among the numerical variables
+# calculate the correlation between the variable in our selected model
+round(cor(sydney.train[,c(2,3,4,5,7,11,12,13,14,15,17,19,20)]),2)
+```
+
+By observing the table above we choose only those variables which don't have a high collinearity and create new model with only those predictors. The new model has been created below.
+
+```{r}
+fit2 = lm(formula = log(RISK_MM, base = 10) ~ Rainfall + Sunshine + WindGustSpeed + WindDir3pm + WindSpeed3pm + Humidity3pm + Pressure3pm + Cloud3pm + Season, data = sydney.train)
+summary(fit2)
+```
+
+```{r}
+fit2.pre = predict(fit2, sydney.test)
+rmse(log(sydney.test$RISK_MM), fit2.pre)
+# no warnings, and RMSE is slightly smaller than the previous model
+```
+
+We can see in the model above that our R-squared has decreased but now when we calculate the RMSE no such warnings for collinearity occur. So, we proceed with the predictors chosen above.
+
+### Section 2.3 Interactions
+
+In this section we try to find any interactions between our predictor variables that might be helpful for better model. To do this we first create a new data set that contains only the variables chosen by us in the above model. We then will check all the interactions possible to the second degree and use the most significant interactions.
+
+```{r}
+sydney.train2 = sydney.train[,c("RISK_MM", "Rainfall", "Humidity3pm", "WindSpeed3pm", "WindGustSpeed", "Sunshine", "WindDir3pm", "Pressure3pm", "Cloud3pm", "Season")]
+fit_int2 = lm(formula = log(RISK_MM, base = 10) ~.^2 , data = sydney.train2)
+summary(fit_int2)
+```
+
+From the summary above we were able to narrow down a few interactions (WindDir3pm:Cloud3pm, Rainfall:Sunshine, Humidity3pm:Sunshine) that were significant in the model. We now try to plot the significant interactions below to notice any other interactions that might be useful.
+
+
+Below is a plot of Sunshine and Cloud at 3pm.
+
+```{r}
+par(mfrow = c(1,2))
+plot(log(RISK_MM) ~ Sunshine, data = sydney.train, col = as.numeric(WindDir3pm)+ 1, pch = as.numeric(WindDir3pm) + 1,  cex = 2)
+plot(log(RISK_MM) ~ Cloud3pm, data = sydney.train, col = as.numeric(WindDir3pm)+ 1, pch = as.numeric(WindDir3pm) + 1,  cex = 2)
+```
+
+We can notice in the plot above for sunshine that there is a higher risk of rainfall the next day when there is minimal sunshine at 3pm that day. A inverse trend is seen for Cloud at 3pm where there is a higher risk of rainfall the next day when there is more cloud cover at 3pm. This makes sense logically too as more cloud cover at 3pm would result in less sunshite at 3pm. Thus, this interaction is useful.
+
+```{r}
+par(mfrow = c(1,2))
+plot(log(RISK_MM) ~ Humidity3pm, data = sydney.train, col = as.numeric(WindDir3pm)+ 1, pch = as.numeric(WindDir3pm) + 1,  cex = 2)
+plot(log(RISK_MM) ~ Pressure3pm, data = sydney.train, col = as.numeric(WindDir3pm)+ 1, pch = as.numeric(WindDir3pm) + 1,  cex = 2)
+```
+
+
+
+```{r}
+par(mfrow = c(1,2))
+plot(log(RISK_MM) ~ Humidity3pm, data = sydney.train, col = as.numeric(Season)+ 1, pch = as.numeric(Season) + 1,  cex = 2)
+plot(log(RISK_MM) ~ Pressure3pm, data = sydney.train, col = as.numeric(Season)+ 1, pch = as.numeric(Season) + 1,  cex = 2)
+```
+
+THe plots above shows Humidity at 3pm to RISK_MM and Pressure at 3pm to RISK_MM. These plots do not yeild any significant trends to show an interaction.
+
+```{r}
+fit3  = lm(formula = log(RISK_MM, base = 10) ~ Rainfall + Sunshine + WindGustSpeed + WindDir3pm + WindSpeed3pm + Humidity3pm + Pressure3pm + Cloud3pm + Season + Sunshine:Cloud3pm + WindDir3pm:Humidity3pm + WindDir3pm:Pressure3pm + WindDir3pm:Cloud3pm + Rainfall:Sunshine + Humidity3pm:Sunshine, data = sydney.train)
+summary(fit3)
+```
+
+Our results with these interactions now yeild a better Multiple and Adjusted R-squared.
+
+```{r}
+fit3.pre = predict(fit3, sydney.test)
+rmse(log(sydney.test$RISK_MM), fit3.pre)
+```
+
+By calculating the RMSE we can also observe that the RMSE has decreased significantly and there aren't any warning indicating correlation among the predictor variables.
+
+Below will try to apply backward AIC step on the model again to optimize our final model.
+
+```{r}
+fit4 = step(fit3, direction = "backward", trace = 0)
+summary(fit4)
+```
+
+```{r}
+fit4.pre = predict(fit4, sydney.test)
+rmse(log(sydney.test$RISK_MM), fit4.pre)
+```
+
+By applying step transformation to the final model we observe a very slight decrease in the R-squared which can be ignored.
+
+## Section 3 Results and Discusstion
+
+```{r}
+par(mfrow = c(2,2))
+plot(fit4)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+## Section 4 Appendix
+
+At the beginning, we choose RISK_MM (The amount of rainfall recorded for next day in mm) as the response and all other variables as the predictors to fit the full model
+
+```{r}
+lm.full = lm(RISK_MM~., data = sydney.train)
+summary(lm.full)
+```
+
+```{r}
+lm.step = step(lm.full,trace = FALSE)
+summary(lm.step)
+```
+
+We find the most significant predictors after doing forward AIC.
+
+Though we note that we can't use RainTomorrow as a predictor since it highly correlated with RISK_MM. From the definition of RainTomorrow we understand why this so, since a high RISK_MM results in Yes for RainTomorrow. Thus RainTomorrow is a response for RISK_MM instead. So we continue finding the best model without RainTomorrow.
+
+```{r}
+sydney.train3 = sydney.train[,c("RISK_MM", "Rainfall", "Evaporation", "Humidity3pm", "Temp9am", "WindSpeed3pm", "WindGustSpeed", 
+    "WindSpeed9am")]
+newmod = lm(formula = RISK_MM ~., 
+    data = sydney.train3)
+summary(newmod)
+```
+
+We observe he R-squared is very low now. We try to take an interaction to the power two to see if it improves.
+
+```{r}
+newmod_int2 = lm(RISK_MM ~.^2, 
+    data = sydney.train3)
+summary(newmod_int2)
+```
+
+From researching online we observe that WindGustSpeed should not be affecting rainfall the next day. SO we have to reconsider our model and eliminate other predictors. 
+
+We observe he R-squared is very low now so forward AIC is not the best step method the use maybe.
+
+We found backward AIC to be the best step method and then came up with a new dataset - sydney.train2 with only variables chosen for the best model. This here is the summary for an interaction model of the power 3. We found this interaction useless as none of the third degree interactions signifcantly increased our R squared so we ignored it. 
+
+```{r}
+fit_int2 = lm(formula = log(RISK_MM, base = 10) ~.^2 , data = sydney.train2)
+summary(fit_int2)
+```
+We try to see if there is any correlation between Pressure at 3pm and the log of RISK_MM.
+
+```{r}
+plot(x = (sydney.weather$Pressure3pm), y = log(sydney.weather$RISK_MM))
+```
+
+Next, we also try to see any correlation using vif.
+
+```{r}
+car::vif(newmod)
+```
